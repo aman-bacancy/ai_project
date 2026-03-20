@@ -34,22 +34,43 @@ export function TaskDetailDrawer({ taskId, members, customFields, currentUserId,
 
     supabase
       .from('tasks')
-      .select('*, assignee:user_profiles!tasks_assignee_id_fkey(*), task_tags(tags(*))')
+      .select('*, task_tags(tags(*))')
       .eq('id', taskId)
       .single()
-      .then(({ data }) => {
+      .then(async ({ data, error }) => {
+        if (error) { console.error('Task fetch error:', error); return }
         if (data) {
-          setTask({ ...data, tags: data.task_tags?.map((tt: any) => tt.tags) ?? [] })
+          // Fetch assignee profile separately to avoid broken FK join
+          let assignee = null
+          if (data.assignee_id) {
+            const { data: profile } = await supabase
+              .from('user_profiles')
+              .select('*')
+              .eq('id', data.assignee_id)
+              .maybeSingle()
+            assignee = profile
+          }
+          setTask({ ...data, assignee, tags: data.task_tags?.map((tt: any) => tt.tags) ?? [] })
           setTitle(data.title)
         }
       })
 
     supabase
       .from('comments')
-      .select('*, author:user_profiles!comments_author_id_fkey(*)')
+      .select('*')
       .eq('task_id', taskId)
       .order('created_at')
-      .then(({ data }) => { if (data) setComments(data) })
+      .then(async ({ data }) => {
+        if (!data) return
+        // Fetch author profiles separately
+        const authorIds = [...new Set(data.map((c: any) => c.author_id))]
+        const { data: profiles } = await supabase
+          .from('user_profiles')
+          .select('*')
+          .in('id', authorIds)
+        const profileMap = Object.fromEntries((profiles ?? []).map((p: any) => [p.id, p]))
+        setComments(data.map((c: any) => ({ ...c, author: profileMap[c.author_id] ?? null })))
+      })
 
     // Realtime for comments
     const channel = supabase
@@ -62,10 +83,15 @@ export function TaskDetailDrawer({ taskId, members, customFields, currentUserId,
       }, (payload) => {
         supabase
           .from('comments')
-          .select('*, author:user_profiles!comments_author_id_fkey(*)')
+          .select('*')
           .eq('id', payload.new.id)
           .single()
-          .then(({ data }) => { if (data) setComments((prev) => [...prev, data]) })
+          .then(async ({ data }) => {
+            if (!data) return
+            const { data: profile } = await supabase
+              .from('user_profiles').select('*').eq('id', data.author_id).maybeSingle()
+            setComments((prev) => [...prev, { ...data, author: profile }])
+          })
       })
       .subscribe()
 

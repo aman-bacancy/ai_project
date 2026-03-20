@@ -34,20 +34,24 @@ export function ListViewPage({ list, project, workspaceSlug, members, customFiel
     const supabase = createClient()
     const { data } = await supabase
       .from('tasks')
-      .select(`
-        *,
-        assignee:user_profiles!tasks_assignee_id_fkey(*),
-        task_tags(tags(*)),
-        custom_field_values(*, field:custom_field_definitions(*))
-      `)
+      .select('*, task_tags(tags(*)), custom_field_values(*, field:custom_field_definitions(*))')
       .eq('list_id', currentListId)
       .eq('is_archived', false)
       .is('parent_task_id', null)
       .order('position')
 
     if (data) {
+      // Fetch assignee profiles separately (assignee_id → auth.users, not user_profiles directly)
+      const assigneeIds = [...new Set(data.map((t: any) => t.assignee_id).filter(Boolean))]
+      const profileMap: Record<string, any> = {}
+      if (assigneeIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from('user_profiles').select('*').in('id', assigneeIds)
+        ;(profiles ?? []).forEach((p: any) => { profileMap[p.id] = p })
+      }
       setTasks(data.map((t: any) => ({
         ...t,
+        assignee: t.assignee_id ? (profileMap[t.assignee_id] ?? null) : null,
         tags: t.task_tags?.map((tt: any) => tt.tags) ?? [],
         custom_field_values: t.custom_field_values ?? [],
       })))
