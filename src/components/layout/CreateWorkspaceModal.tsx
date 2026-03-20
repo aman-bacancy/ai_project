@@ -25,76 +25,72 @@ export function CreateWorkspaceModal() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // Check if org exists for user
-    let orgId: string
-    const { data: existingMember } = await supabase
-      .from('organization_members')
-      .select('organization_id')
-      .eq('user_id', user.id)
-      .limit(1)
-      .single()
+    try {
+      // Get existing org or create one — use maybeSingle to avoid error on no rows
+      let orgId: string
+      const { data: existingMember } = await supabase
+        .from('organization_members')
+        .select('organization_id')
+        .eq('user_id', user.id)
+        .limit(1)
+        .maybeSingle()
 
-    if (existingMember) {
-      orgId = existingMember.organization_id
-    } else {
-      // Create default org
-      const slug = user.email?.split('@')[0] ?? 'my-org'
-      const { data: org, error } = await supabase
-        .from('organizations')
-        .insert({ name: `${user.email?.split('@')[0]}'s Organization`, slug: `${slug}-${Date.now()}` })
-        .select()
-        .single()
+      if (existingMember) {
+        orgId = existingMember.organization_id
+      } else {
+        // Generate org ID client-side to avoid RLS read-back issue
+        const { data: newId } = await supabase.rpc('gen_random_uuid').single() as any
+        orgId = newId ?? crypto.randomUUID()
 
-      if (error || !org) {
-        toast.error('Failed to create organization')
-        setLoading(false)
-        return
+        const emailSlug = user.email?.split('@')[0] ?? 'user'
+        const { error: orgError } = await supabase
+          .from('organizations')
+          .insert({ id: orgId, name: `${emailSlug}'s Organization`, slug: `${emailSlug}-org-${Date.now()}` })
+
+        if (orgError) throw new Error('org: ' + orgError.message)
+
+        const { error: memberError } = await supabase
+          .from('organization_members')
+          .insert({ organization_id: orgId, user_id: user.id, role: 'owner' })
+
+        if (memberError) throw new Error('org_member: ' + memberError.message)
       }
 
-      orgId = org.id
-      await supabase.from('organization_members').insert({
-        organization_id: orgId,
-        user_id: user.id,
-        role: 'owner',
-      })
-    }
+      // Generate workspace ID client-side
+      const workspaceId = crypto.randomUUID()
+      const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + '-' + Date.now()
 
-    const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + '-' + Date.now()
+      const { error: wsError } = await supabase
+        .from('workspaces')
+        .insert({
+          id: workspaceId,
+          organization_id: orgId,
+          name: name.trim(),
+          slug,
+          description: description.trim() || null,
+          color,
+          created_by: user.id,
+        })
 
-    const { data: workspace, error } = await supabase
-      .from('workspaces')
-      .insert({
-        organization_id: orgId,
-        name: name.trim(),
-        slug,
-        description: description.trim() || null,
-        color,
-        created_by: user.id,
-      })
-      .select()
-      .single()
+      if (wsError) throw new Error('workspace: ' + wsError.message)
 
-    if (error) {
-      toast.error('Failed to create workspace')
+      const { error: wsMemberError } = await supabase
+        .from('workspace_members')
+        .insert({ workspace_id: workspaceId, user_id: user.id, role: 'owner' })
+
+      if (wsMemberError) throw new Error('ws_member: ' + wsMemberError.message)
+
+      toast.success('Workspace created!')
+      setCreateWorkspaceModalOpen(false)
+      setName('')
+      setDescription('')
+      window.location.href = `/workspace/${slug}`
+    } catch (err: any) {
+      console.error(err)
+      toast.error('Failed to create workspace: ' + err.message)
+    } finally {
       setLoading(false)
-      return
     }
-
-    // Add creator as owner member
-    await supabase.from('workspace_members').insert({
-      workspace_id: workspace.id,
-      user_id: user.id,
-      role: 'owner',
-    })
-
-    toast.success('Workspace created!')
-    setCreateWorkspaceModalOpen(false)
-    setName('')
-    setDescription('')
-    setLoading(false)
-
-    // Reload page to show new workspace
-    window.location.href = `/workspace/${workspace.slug}`
   }
 
   return (
